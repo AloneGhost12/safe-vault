@@ -30,8 +30,23 @@ VS Code may flag `@tailwind` or `@apply` as unknown until PostCSS runs; this is 
 - Edit UI: `src/App.jsx`
 - Global styles: `src/styles.css`
 - Tailwind config: `tailwind.config.cjs`
- - Firebase setup: `src/firebase.js` (uses Vite env vars)
+ - Mongo + Cloudinary backend already integrated (see server.js). Firebase has been fully removed.
 
 ## Notes
-All file encryption, sharing, and security operations are currently simulated (UI only). Add real logic / backend as needed.
-Encrypted file payload (AES-GCM ciphertext base64) is also uploaded to Firebase Storage under `vault/` when available. Master password never leaves the client; losing it means data unrecoverable.
+End-to-end encryption performed in-browser (AES-GCM). Encrypted blobs are uploaded to Cloudinary via unsigned raw uploads. Metadata (still encrypted) and activity logs are stored in MongoDB through the Express server. Master password never leaves the client; losing it means encrypted data cannot be recovered.
+
+## Environment Variables
+Create a `.env.local` for client-exposed vars and standard `.env` (server) for secrets.
+
+Client (prefix with VITE_):
+- VITE_CLOUDINARY_CLOUD_NAME
+- VITE_CLOUDINARY_UPLOAD_PRESET
+- VITE_API_BASE_URL  (e.g. https://your-render-app.onrender.com)
+
+Server only:
+- CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET
+- MONGODB_URI (e.g. mongodb+srv://user:pass@cluster/db)
+- MONGODB_DB (optional, default safe_vault)
+- JWT_SECRET (for auth endpoints if extended)
+
+Remove any legacy Firebase vars; they are no longer used.

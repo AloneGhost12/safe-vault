@@ -1,11 +1,7 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { hasMasterPassword, createMasterPassword, unlockWithPassword, encryptArrayBuffer } from './services/crypto.js';
 import { getClientConfig } from './services/clientConfig.js';
-import { db, auth, rtdb } from './firebase.js';
-import { collection, addDoc, getDocs, query, where, orderBy, deleteDoc, doc, updateDoc } from 'firebase/firestore';
-import { signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
-// Firebase Storage removed (migrated to Cloudinary)
-import { ref as dbRef, push, set, onValue, onDisconnect, serverTimestamp, remove } from 'firebase/database';
+import { listFiles, createFile, deleteFile as deleteFileApi, patchFile, addActivity, listActivity, mongoStatus } from './services/mongoApi.js';
 
 const App = () => {
   // State management
@@ -58,40 +54,28 @@ const App = () => {
   const [pwdForm, setPwdForm] = useState({ current:'', next:'', confirm:'', working:false, error:'' });
   // Upload progress (per temporary id)
   const [uploadProgress, setUploadProgress] = useState({});
-  const [remoteDisabled, setRemoteDisabled] = useState(false); // if anon auth blocked
-  const [remoteAuthError, setRemoteAuthError] = useState(null); // store auth error for UI guidance
-  const [authProviderLoading, setAuthProviderLoading] = useState(false);
+  // Cloud/backend integration (Mongo replacement for previous Firebase logic)
+  const [authProviderLoading] = useState(false); // placeholder (Google sign-in removed)
   const [failedUploads, setFailedUploads] = useState({}); // { fileId: { buffer, mime, name, category, size } }
-  const [remoteError, setRemoteError] = useState(null);
-  const [offlineMode, setOfflineMode] = useState(false); // manual override to skip cloud
-  const [remoteErrorCount, setRemoteErrorCount] = useState(0);
-  const [activityLog, setActivityLog] = useState([]); // realtime db activity entries
-  const [indexNeeded, setIndexNeeded] = useState(null); // { url, message }
+  const [offlineMode, setOfflineMode] = useState(false); // manual toggle
+  const [activityLog, setActivityLog] = useState([]); // activity entries from Mongo
+  const [mongoConnected, setMongoConnected] = useState(null); // null=unknown, bool once fetched
   const [legacyReuploadTarget, setLegacyReuploadTarget] = useState(null);
   const [cloudinaryErrors, setCloudinaryErrors] = useState({}); // { fileId: message }
   const [lastCloudinaryError, setLastCloudinaryError] = useState(null);
-  // Helper to log an activity entry (guarded by online/cloud state)
+  // Helper to log an activity entry (Mongo)
   const logActivity = async (entry) => {
     try {
-      if (offlineMode || remoteDisabled || !auth.currentUser) return;
-      const uid = auth.currentUser.uid;
-      const entryRef = push(dbRef(rtdb, `activity/${uid}`));
-      await set(entryRef, { ts: Date.now(), ...entry });
+      if (offlineMode) return;
+      const email = userProfile.email || user.email;
+      await addActivity({ email, ts: Date.now(), ...entry });
+      setActivityLog(prev => [{ email, ts: Date.now(), ...entry }, ...prev].slice(0,25));
     } catch {/* ignore */}
   };
 
   const handleGoogleSignIn = async () => {
-    try {
-      setAuthProviderLoading(true);
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-      setRemoteDisabled(false); // cloud now available
-      if (authState.unlocked) loadRemoteFiles();
-      showNotificationMessage('Google sign-in successful','success');
-    } catch(e){
-      showNotificationMessage('Google sign-in failed','error');
-      console.warn('Google sign-in error', e);
-    } finally { setAuthProviderLoading(false); }
+    // Deprecated (Firebase removed); keep placeholder to avoid UI errors if invoked.
+    showNotificationMessage('Federated sign-in not implemented (Firebase removed)','warning');
   };
 
   // Apply dark mode
@@ -137,108 +121,62 @@ const App = () => {
     } else {
       setAuthState(a => ({ ...a, step: 'create' }));
     }
-    // Restore persisted remoteDisabled flag (to avoid repeated anon auth errors on reload)
-    try {
-      if (localStorage.getItem('sv_remote_disabled') === 'true') {
-        setRemoteDisabled(true);
-      }
-    } catch {}
   }, []);
-
-  // Anonymous auth and remote file loading
+  // Mongo status + initial loads when unlocked
+  // Initial Mongo status + retry until connected (handles race where server connects after first check)
   useEffect(()=>{
-    if (remoteDisabled || offlineMode) return; // don't keep retrying if disabled/offline
-    const unsub = onAuthStateChanged(auth, async (u)=>{
-      if(!u){
-        // Allow disabling anonymous auth attempts via env (so we don't spam console if disabled in Firebase)
-        const anonDisabledFlag = import.meta.env.VITE_FIREBASE_DISABLE_ANON === 'true';
-        if (anonDisabledFlag) {
-          setRemoteDisabled(true);
-          setRemoteAuthError({ code: 'auth/disabled-via-env', message: 'Anonymous auth disabled by env flag.' });
-        } else {
-          try {
-            await signInAnonymously(auth);
-          } catch(e){
-            console.warn('Anon sign-in failed', e);
-            setRemoteDisabled(true);
-            setRemoteAuthError(e);
-            try { localStorage.setItem('sv_remote_disabled','true'); } catch {}
-          }
+    let attempts = 0;
+    let stopped = false;
+    const maxAttempts = 12; // ~24s total (2s interval)
+    const check = async () => {
+      if (stopped) return;
+      try {
+        const st = await mongoStatus();
+        setMongoConnected(!!st.connected);
+        if (!st.connected && attempts < maxAttempts) {
+          attempts++; setTimeout(check, 2000);
         }
-      } else if (authState.unlocked) {
-        loadRemoteFiles();
+      } catch {
+        setMongoConnected(false);
+        if (attempts < maxAttempts) { attempts++; setTimeout(check, 2500); }
       }
-    });
-    return ()=>unsub();
-  }, [authState.unlocked, remoteDisabled, offlineMode]);
-
-  // Presence + activity listener (Realtime DB)
+    };
+    check();
+    return () => { stopped = true; };
+  }, []);
   useEffect(()=>{
-    if (offlineMode || remoteDisabled || !auth.currentUser) return;
-    const uid = auth.currentUser.uid;
-    // Presence
-    const presenceRef = dbRef(rtdb, `presence/${uid}`);
-    const disconnectRef = dbRef(rtdb, `presence/${uid}`);
-    try {
-      set(presenceRef, { online: true, ts: Date.now() }).catch(()=>{});
-      onDisconnect(disconnectRef).remove().catch(()=>{});
-    } catch {}
-    // Activity log listener (limit client-side to last 25 entries)
-    const actRef = dbRef(rtdb, `activity/${uid}`);
-    const off = onValue(actRef, snap => {
-      const val = snap.val() || {};
-      const entries = Object.values(val).sort((a,b)=> (b.ts||0)-(a.ts||0)).slice(0,25);
-      setActivityLog(entries);
-    });
-    return ()=>{ off(); try { remove(presenceRef); } catch {} };
-  }, [offlineMode, remoteDisabled, auth.currentUser]);
+    if (!authState.unlocked || offlineMode) return;
+    loadRemoteFiles();
+  }, [authState.unlocked, offlineMode]);
+  useEffect(()=>{
+    if (!authState.unlocked || offlineMode) return;
+    let stop = false;
+    const fetchAct = async () => {
+      try { const email = userProfile.email || user.email; const r = await listActivity(email, 25); if(!stop) setActivityLog(r.activity||[]); } catch {}
+    };
+    fetchAct();
+    const iv = setInterval(fetchAct, 10000);
+    return ()=>{ stop=true; clearInterval(iv); };
+  }, [authState.unlocked, offlineMode, userProfile.email]);
 
   const loadRemoteFiles = async () => {
-  if(remoteDisabled || offlineMode || !auth.currentUser) return;
-  if (indexNeeded && Date.now() - (indexNeeded.lastTried||0) < 15000) { return; }
-  if (indexNeeded) setIndexNeeded(prev => prev ? { ...prev, lastTried: Date.now() } : prev);
+    if (offlineMode) return;
     setLoadingFiles(true);
     try {
-      const q = query(collection(db,'files'), where('uid','==', auth.currentUser.uid), orderBy('createdAt','desc'));
-      const snap = await getDocs(q);
-      const list = [];
-      snap.forEach(d=>{ const data = d.data(); list.push({ ...data, id: data.localId || d.id }); });
-      setUploadedFiles(list);
-      setRemoteError(null);
-      setIndexNeeded(null);
-    } catch(e){ 
-      console.warn('Fetch remote files failed', e); 
-      const msg = (e && e.message) ? e.message : '';
-      // Detect missing index error (Firestore typically includes "The query requires an index. You can create it here: <URL>")
-      if (/requires an index/i.test(msg) && /create it here/i.test(msg)) {
-        const urlMatch = msg.match(/https?:\/\/[^\s)]+/i);
-        if (urlMatch) setIndexNeeded({ url: urlMatch[0], message: msg });
-        // Do NOT count towards remoteErrorCount; show specific guidance instead
-      } else {
-        // Retry fallback without orderBy (rules may block composite or index not built)
-        try {
-          const q2 = query(collection(db,'files'), where('uid','==', auth.currentUser.uid));
-          const snap2 = await getDocs(q2);
-          const list2 = [];
-          snap2.forEach(d=>{ const data = d.data(); list2.push({ ...data, id: data.localId || d.id }); });
-          if (list2.length) {
-            setUploadedFiles(list2.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0)));
-            setRemoteError(null);
-            setLoadingFiles(false);
-            return;
-          }
-        } catch(inner){ console.warn('Fallback Firestore fetch failed', inner); }
-        setRemoteError(msg || 'Remote load failed');
-        setRemoteErrorCount(c => {
-          const next = c + 1;
-          if (next >= 3) {
-            setOfflineMode(true);
-            showNotificationMessage('Cloud errors ΓÇô switched to offline mode','warning');
-          }
-          return next;
-        });
-      }
-    }
+      const email = userProfile.email || user.email;
+      const r = await listFiles(email);
+      const files = (r.files||[]).map(doc => ({
+        ...doc,
+        id: doc._id || doc.id,
+        docId: doc._id || doc.id,
+        uid: email
+      }));
+      setUploadedFiles(prev => {
+        // Merge: keep local items not yet uploaded (no docId)
+        const locals = prev.filter(f => !f.docId);
+        return [...files, ...locals];
+      });
+    } catch(e){ console.warn('Mongo list failed', e); }
     setLoadingFiles(false);
   };
 
@@ -433,38 +371,21 @@ const App = () => {
           cloudinaryId,
           cloudError: cloudErrMsg || null,
           rawBytes: file.size,
-          uid: auth.currentUser?.uid || null,
+          uid: userProfile.email || user.email,
           createdAt: Date.now(),
           uploading: false
         };
         setUploadedFiles(prev => prev.map(f => f.id === tempId ? newFile : f));
         if (cloudErrMsg) { setCloudinaryErrors(e => ({ ...e, [finalId]: cloudErrMsg })); setLastCloudinaryError(cloudErrMsg); }
         setUploadProgress(p => { const { [tempId]:_, ...rest } = p; return rest; });
-  // Success: drop any failed buffer record
-  setFailedUploads(f => { const { [tempId]:__, ...rest } = f; return rest; });
-        // Activity log (Realtime DB)
-  logActivity({ action:'upload', id:newFile.id, name:newFile.name, size:newFile.rawBytes, category:newFile.category });
+        setFailedUploads(f => { const { [tempId]:__, ...rest } = f; return rest; });
+        logActivity({ action:'upload', id:newFile.id, name:newFile.name, size:newFile.rawBytes, category:newFile.category });
+        // Persist to Mongo
         try {
-          if (!remoteDisabled && auth.currentUser) {
-            const docRef = await addDoc(collection(db,'files'), {
-              uid: auth.currentUser.uid,
-              localId: newFile.localId,
-              name: newFile.name,
-              category: newFile.category,
-              size: newFile.size,
-              date: newFile.date,
-              type: newFile.type,
-              iv: newFile.iv,
-              data: newFile.data,
-              mime: newFile.mime,
-              cloudinaryId: newFile.cloudinaryId,
-              rawBytes: newFile.rawBytes,
-              createdAt: newFile.createdAt
-            });
-            // Store doc id for faster deletion later
-            setUploadedFiles(prev => prev.map(f => f.id === newFile.id ? { ...f, docId: docRef.id } : f));
-          }
-        } catch(e){ console.warn('Firestore add failed', e); }
+          const email = userProfile.email || user.email;
+          const r = await createFile({ email, name:newFile.name, category:newFile.category, size:newFile.size, date:newFile.date, type:newFile.type, iv:newFile.iv, data:newFile.data, mime:newFile.mime, cloudinaryId:newFile.cloudinaryId, rawBytes:newFile.rawBytes, createdAt:newFile.createdAt });
+          if (r && r.id) setUploadedFiles(prev => prev.map(f => f.id === newFile.id ? { ...f, docId: r.id, id: r.id } : f));
+        } catch(e){ console.warn('Mongo create failed', e); }
       } catch (e) {
   // Mark placeholder (if still present) as failed so UI doesn't stay stuck
   setUploadedFiles(prev => prev.map(f => f.name === file.name && f.uploading ? { ...f, uploading:false, error:'Encrypt failed'} : f));
@@ -523,7 +444,7 @@ const App = () => {
   cloudinaryId,
         cloudError: cloudErrMsg || null,
         rawBytes: failMeta.size,
-        uid: auth.currentUser?.uid || null,
+  uid: userProfile.email || user.email,
         createdAt: Date.now(),
         uploading:false
       };
@@ -532,25 +453,10 @@ const App = () => {
       setUploadProgress(p => { const { [file.id]:_, ...rest } = p; return rest; });
       setFailedUploads(f => { const { [file.id]:__, ...rest } = f; return rest; });
       try {
-        if (!remoteDisabled && auth.currentUser) {
-          const docRef = await addDoc(collection(db,'files'), {
-            uid: auth.currentUser.uid,
-            localId: updated.localId,
-            name: updated.name,
-            category: updated.category,
-            size: updated.size,
-            date: updated.date,
-            type: updated.type,
-            iv: updated.iv,
-            data: updated.data,
-            mime: updated.mime,
-            cloudinaryId: updated.cloudinaryId,
-            rawBytes: updated.rawBytes,
-            createdAt: updated.createdAt
-          });
-          setUploadedFiles(prev => prev.map(f => f.id === updated.id ? { ...f, docId: docRef.id } : f));
-        }
-      } catch(e){ console.warn('Retry Firestore add failed', e); }
+        const email = userProfile.email || user.email;
+        const r = await createFile({ email, name:updated.name, category:updated.category, size:updated.size, date:updated.date, type:updated.type, iv:updated.iv, data:updated.data, mime:updated.mime, cloudinaryId:updated.cloudinaryId, rawBytes:updated.rawBytes, createdAt:updated.createdAt });
+        if (r && r.id) setUploadedFiles(prev => prev.map(f => f.id === updated.id ? { ...f, docId: r.id, id:r.id } : f));
+      } catch(e){ console.warn('Retry Mongo create failed', e); }
       showNotificationMessage('Retry succeeded', 'success');
   logActivity({ action:'retry-success', id:updated.id, name:updated.name, size:updated.rawBytes, category:updated.category });
     } catch(e){
@@ -606,32 +512,19 @@ const App = () => {
         needsReencrypt: false,
         uploading: false,
         createdAt: Date.now(),
-        uid: auth.currentUser?.uid || null,
+  uid: userProfile.email || user.email,
         cloudinaryId,
         error: undefined
       };
       setUploadedFiles(prev => prev.map(file => file.id === targetId ? { ...file, ...updated } : file));
-      // If cloud available and no docId yet, add Firestore doc
+      // Persist legacy replacement to Mongo if not present
       const fileEntry = uploadedFiles.find(x => x.id === targetId);
-      if (!remoteDisabled && !offlineMode && auth.currentUser && fileEntry && !fileEntry.docId) {
+      if (!offlineMode && fileEntry && !fileEntry.docId) {
         try {
-          const docRef = await addDoc(collection(db,'files'), {
-            uid: auth.currentUser.uid,
-            localId: fileEntry.localId || targetId,
-            name: updated.name,
-            category: fileEntry.category || 'Other',
-            size: updated.size,
-            date: updated.date,
-            type: updated.type,
-            iv: updated.iv,
-            data: updated.data,
-            mime: updated.mime,
-            cloudinaryId: updated.cloudinaryId || fileEntry.cloudinaryId || null,
-            rawBytes: updated.rawBytes,
-            createdAt: updated.createdAt
-          });
-          setUploadedFiles(prev => prev.map(f2 => f2.id === targetId ? { ...f2, docId: docRef.id } : f2));
-        } catch(err){ console.warn('Legacy replacement Firestore add failed', err); }
+          const email = userProfile.email || user.email;
+          const r = await createFile({ email, name:updated.name, category:fileEntry.category||'Other', size:updated.size, date:updated.date, type:updated.type, iv:updated.iv, data:updated.data, mime:updated.mime, cloudinaryId:updated.cloudinaryId||fileEntry.cloudinaryId||null, rawBytes:updated.rawBytes, createdAt:updated.createdAt });
+          if (r && r.id) setUploadedFiles(prev => prev.map(f2 => f2.id === targetId ? { ...f2, docId: r.id, id:r.id } : f2));
+        } catch(err){ console.warn('Legacy replacement Mongo add failed', err); }
       }
       logActivity({ action:'legacy-reupload', id:targetId, name: updated.name, size: updated.rawBytes });
       showNotificationMessage('File replaced & encrypted','success');
@@ -649,15 +542,8 @@ const App = () => {
       if (file && file.docId) targetDocId = file.docId;
       return prev.filter(f => f.id !== id);
     });
-    if (!remoteDisabled && targetDocId && auth.currentUser) {
-      try { await deleteDoc(doc(db,'files', targetDocId)); } catch(e){ console.warn('Remote delete failed', e); }
-    } else if (!remoteDisabled && auth.currentUser) {
-      // Fallback (legacy items without docId) - still scan once
-      try {
-        const q = query(collection(db,'files'), where('uid','==',auth.currentUser.uid));
-        const snap = await getDocs(q);
-        snap.forEach(async d=> { if ((d.data().localId||d.id)===id) await deleteDoc(doc(db,'files', d.id)); });
-      } catch(e){ console.warn('Remote delete failed', e); }
+    if (targetDocId) {
+      try { await deleteFileApi(targetDocId); } catch(e){ console.warn('Mongo delete failed', e); }
     }
     showNotificationMessage('File removed', 'success');
   logActivity({ action:'delete', id, name:'', size:0 });
@@ -700,10 +586,8 @@ const App = () => {
       const json = await res.json();
       const cid = json.public_id;
       setUploadedFiles(prev => prev.map(f => f.id === file.id ? { ...f, cloudinaryId: cid, uploading:false } : f));
-      // Persist to Firestore doc if present
-      if (!remoteDisabled && file.docId && auth.currentUser) {
-        try { await updateDoc(doc(db,'files', file.docId), { cloudinaryId: cid }); } catch(e){ console.warn('Update doc with cloudinaryId failed', e); }
-      }
+  // (Firebase removed) previously would persist cloudinaryId to Firestore
+  if (file.docId) { try { await patchFile(file.docId, { cloudinaryId: cid }); } catch(e){ console.warn('Mongo patch failed', e); } }
       logActivity({ action:'cloudinary-backfill', id:file.id, name:file.name, size:file.rawBytes||0, category:file.category });
       showNotificationMessage('Uploaded encrypted blob to Cloudinary');
     } catch(e){
@@ -732,40 +616,23 @@ const App = () => {
   useEffect(()=>{ localStorage.setItem('sv_links', JSON.stringify(oneTimeLinks)); }, [oneTimeLinks]);
   useEffect(()=>{ localStorage.setItem('sv_emergency', JSON.stringify(emergencyConfig)); }, [emergencyConfig]);
 
-  // Backfill any locally existing files that never got uploaded to Firestore (no docId) once cloud is available
+  // Backfill any locally existing files that never got uploaded to Mongo (no docId) once unlocked
   useEffect(()=>{
-    if (!auth.currentUser || remoteDisabled || offlineMode || !authState.unlocked) return;
-    // Only backfill properly encrypted items (must have iv & data) and not already having a docId
-    const pending = uploadedFiles.filter(f => !f.docId && (!f.uid || f.uid !== auth.currentUser.uid) && f.iv && f.data);
-    // Mark legacy/invalid items (missing iv or data) only once
+    if (offlineMode || !authState.unlocked) return;
+    const email = userProfile.email || user.email;
+    const pending = uploadedFiles.filter(f => !f.docId && f.iv && f.data);
     const invalid = uploadedFiles.filter(f => !f.docId && (!f.iv || !f.data) && !f.needsReencrypt);
-    if (invalid.length) {
-      setUploadedFiles(prev => prev.map(f => (!f.docId && (!f.iv || !f.data) && !f.needsReencrypt) ? { ...f, needsReencrypt:true } : f));
-    }
-    if (!pending.length) return; // nothing valid to backfill (or only invalid already marked)
-    (async () => {
-      for (const f of pending) {
+    if (invalid.length) setUploadedFiles(prev => prev.map(f => (!f.docId && (!f.iv || !f.data) && !f.needsReencrypt)? { ...f, needsReencrypt:true } : f));
+    if (!pending.length) return;
+    (async()=>{
+      for(const f of pending){
         try {
-          const docRef = await addDoc(collection(db,'files'), {
-            uid: auth.currentUser.uid,
-            localId: f.localId || f.id,
-            name: f.name,
-            category: f.category,
-            size: f.size,
-            date: f.date,
-            type: f.type,
-            iv: f.iv,
-            data: f.data,
-            mime: f.mime,
-            cloudinaryId: f.cloudinaryId || null,
-            rawBytes: f.rawBytes,
-            createdAt: f.createdAt || Date.now()
-          });
-          setUploadedFiles(prev => prev.map(x => x.id === f.id ? { ...x, uid: auth.currentUser.uid, docId: docRef.id } : x));
-        } catch(e){ console.warn('Backfill Firestore add failed', e); }
+          const r = await createFile({ email, name:f.name, category:f.category, size:f.size, date:f.date, type:f.type, iv:f.iv, data:f.data, mime:f.mime, cloudinaryId:f.cloudinaryId||null, rawBytes:f.rawBytes, createdAt:f.createdAt||Date.now() });
+          if (r && r.id) setUploadedFiles(prev => prev.map(x => x.id === f.id ? { ...x, docId:r.id, id:r.id } : x));
+        } catch(e){ console.warn('Backfill Mongo add failed', e); }
       }
     })();
-  }, [uploadedFiles, auth.currentUser, remoteDisabled, offlineMode, authState.unlocked]);
+  }, [uploadedFiles, offlineMode, authState.unlocked, userProfile.email]);
 
   // Dynamic storage usage calculation
   const totalBytes = uploadedFiles.reduce((sum,f)=> sum + (f.rawBytes || 0), 0);
@@ -872,27 +739,7 @@ const App = () => {
         </div>
       )}
       {/* Cloud auth guidance banner when anonymous auth is disabled / fails */}
-      {remoteDisabled && !offlineMode && (
-        <div className="mx-auto max-w-5xl mt-4 px-4">
-          <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-900/30 p-4 text-sm text-amber-800 dark:text-amber-200 flex flex-col gap-2">
-            <div className="font-medium flex items-center gap-2"><i className="fas fa-cloud-slash"/> Cloud Sync Unavailable</div>
-            <div>
-              {remoteAuthError?.code === 'auth/admin-restricted-operation' && (
-                <span>Firebase anonymous sign-in is disabled for this project (admin-restricted-operation). Enable Anonymous provider in Firebase Console &gt; Authentication &gt; Sign-in method, or use Google Sign-In below.
-                </span>
-              )}
-              {remoteAuthError?.code === 'auth/disabled-via-env' && (
-                <span>Anonymous auth attempts skipped due to VITE_FIREBASE_DISABLE_ANON=true. Use Google Sign-In or set that flag to false.</span>
-              )}
-              {!remoteAuthError && <span>Cloud sync is currently disabled. You can still work locally.</span>}
-            </div>
-            <div className="flex flex-wrap gap-3">
-              <button onClick={()=>setOfflineMode(true)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded bg-gray-800 text-white text-xs hover:bg-gray-700 dark:bg-gray-700 dark:hover:bg-gray-600"><i className="fas fa-plug"/> Work Offline Only</button>
-              <button disabled={authProviderLoading} onClick={handleGoogleSignIn} className="inline-flex items-center gap-2 px-3 py-1.5 rounded bg-blue-600 text-white text-xs hover:bg-blue-700 disabled:opacity-60"><i className="fab fa-google"/>{authProviderLoading ? 'Signing in...' : 'Sign in with Google'}</button>
-            </div>
-          </div>
-        </div>
-      )}
+  {/* Firebase remote auth banner removed. */}
 
       {/* Notification System */}
       <div 
@@ -923,39 +770,11 @@ const App = () => {
           <i className="fas fa-times"></i>
         </button>
       </div>
-      {remoteDisabled && (
-        <div className="fixed top-4 left-4 z-40 max-w-md p-4 space-y-2 rounded-md bg-yellow-100 border border-yellow-300 text-sm text-yellow-900 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-700 shadow">
-          <p className="leading-snug">Cloud sync disabled (anonymous auth blocked). Enable Anonymous Auth OR sign in with Google to access Firestore files.</p>
-          <button onClick={handleGoogleSignIn} disabled={authProviderLoading} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-white/70 dark:bg-gray-800 text-sm font-medium border border-yellow-400 hover:bg-white disabled:opacity-60">
-            {authProviderLoading && <i className="fas fa-circle-notch fa-spin"/>}
-            <i className="fas fa-cloud"/>
-            Google Sign-In
-          </button>
-        </div>
-      )}
-      {remoteError && !remoteDisabled && !offlineMode && (
-        <div className="fixed top-4 left-4 z-40 max-w-md p-3 rounded-md bg-red-100 border border-red-300 text-sm text-red-800 dark:bg-red-900/30 dark:text-red-300 dark:border-red-700 shadow space-y-2">
-          <p>Cloud error: {remoteError}</p>
-          <div className="flex gap-2">
-            <button onClick={()=>loadRemoteFiles()} className="px-2 py-1 text-xs rounded bg-red-500 text-white">Retry</button>
-            <button onClick={()=>setOfflineMode(true)} className="px-2 py-1 text-xs rounded border border-red-400">Go Offline</button>
-          </div>
-        </div>
-      )}
-      {indexNeeded && !offlineMode && (
-        <div className="fixed top-4 left-4 z-40 max-w-sm p-4 rounded-md bg-indigo-100 border border-indigo-300 text-xs text-indigo-900 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700 shadow space-y-2">
-          <p className="font-semibold">Firestore index required</p>
-          <p className="break-words max-h-28 overflow-auto opacity-80">The current query needs a composite index (uid + createdAt desc).</p>
-          <div className="flex flex-wrap gap-2">
-            <a href={indexNeeded.url} target="_blank" rel="noopener noreferrer" className="px-2 py-1 text-[11px] rounded bg-indigo-600 text-white font-medium hover:bg-indigo-700">Open Index Builder</a>
-            <button onClick={()=>{ setIndexNeeded(null); loadRemoteFiles(); }} className="px-2 py-1 text-[11px] rounded border border-indigo-400">Dismiss</button>
-          </div>
-        </div>
-      )}
+  {/* Firebase error/index banners removed */}
       {offlineMode && (
         <div className="fixed bottom-4 left-4 z-40 px-3 py-2 rounded-md bg-gray-800 text-gray-100 text-xs shadow flex items-center gap-3">
           <span>Offline mode (cloud disabled)</span>
-          <button onClick={()=>{ setOfflineMode(false); setRemoteError(null); if(auth.currentUser && authState.unlocked) loadRemoteFiles(); }} className="px-2 py-0.5 text-xs rounded bg-blue-600">Reconnect</button>
+          <button onClick={()=>{ setOfflineMode(false); if(authState.unlocked) loadRemoteFiles(); }} className="px-2 py-0.5 text-xs rounded bg-blue-600">Reconnect</button>
         </div>
       )}
 
@@ -1030,18 +849,21 @@ const App = () => {
               <div className="ml-3 relative">
                 <div>
                 {import.meta.env.DEV && (
-                  <div className="fixed bottom-2 right-2 z-50 text-[10px] leading-tight font-mono bg-black/70 text-gray-100 p-2 rounded shadow space-y-0.5 max-w-[220px]">
+                  <div className="fixed bottom-2 right-2 z-50 text-[10px] leading-tight font-mono bg-black/70 text-gray-100 p-2 rounded shadow space-y-0.5 max-w-[240px]">
                     <div className="font-semibold text-xs">Debug Status</div>
-                    <div>UID: {auth.currentUser?.uid || 'none'}</div>
+                    <div className="flex items-center gap-1">
+                      <span>Mongo:</span>
+                      <span className={mongoConnected? 'text-green-400':'text-red-300'}>{mongoConnected===null? '...' : mongoConnected? 'connected' : 'disconnected'}</span>
+                      <button
+                        onClick={async()=>{ try { const st = await mongoStatus(); setMongoConnected(!!st.connected); if(st.connected && authState.unlocked) loadRemoteFiles(); } catch { setMongoConnected(false); } }}
+                        className="ml-auto px-1.5 py-0.5 bg-gray-600/60 hover:bg-gray-500 rounded"
+                      >↺</button>
+                    </div>
                     <div>Unlocked: {String(authState.unlocked)}</div>
-                    <div>remoteDisabled: {String(remoteDisabled)}</div>
-                      <div>offlineMode: {String(offlineMode)}</div>
-                    <div>remoteError: {remoteError ? remoteError.slice(0,40) : 'none'}</div>
-                    <div>remoteErrCount: {remoteErrorCount}</div>
+                    <div>offlineMode: {String(offlineMode)}</div>
                     <div>Files: {uploadedFiles.length}</div>
-                    <div>FirestoreDebug: {String(import.meta.env.VITE_FIRESTORE_DEBUG==='true')}</div>
                     <button
-                      onClick={()=>{ if(auth.currentUser && authState.unlocked) loadRemoteFiles(); }}
+                      onClick={()=>{ if(authState.unlocked) loadRemoteFiles(); }}
                       className="mt-1 w-full bg-blue-600/80 hover:bg-blue-600 text-white py-0.5 rounded text-[10px]"
                     >Reload Remote</button>
                   </div>
@@ -1304,7 +1126,7 @@ const App = () => {
               <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-lg font-medium text-gray-900 dark:text-white">Recent Activity</h3>
-                  <button disabled={activityLog.length===0} onClick={()=>{ if(!auth.currentUser) return; remove(dbRef(rtdb, `activity/${auth.currentUser.uid}`)).catch(()=>{}); setActivityLog([]); }} className="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 disabled:opacity-40">Clear</button>
+                  <button disabled={activityLog.length===0} onClick={()=>{ setActivityLog([]); }} className="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 disabled:opacity-40">Clear</button>
                 </div>
                 <div className="space-y-3">
                   {activityLog.length === 0 && <p className="text-sm text-gray-500 dark:text-gray-400">No recent activity</p>}
@@ -1314,7 +1136,7 @@ const App = () => {
                         <p className="font-medium text-gray-800 dark:text-gray-200 truncate">{a.name}</p>
                         <p className="text-[10px] text-gray-500 dark:text-gray-400">{a.action} ΓÇó {(a.size/1024).toFixed(1)} KB ΓÇó {new Date(a.ts).toLocaleTimeString()}</p>
                       </div>
-                      <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">RTDB</span>
+                      <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300">Mongo</span>
                     </div>
                   ))}
                 </div>
