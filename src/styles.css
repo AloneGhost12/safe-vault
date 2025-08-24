@@ -1,0 +1,14 @@
+﻿/* Fallback if Font Awesome CDN fails: simple lock and file icons using emoji */
+.fa-lock:before { content: '\1F512'; }
+.fa-file:before { content: '\1F5CE'; }
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbar & body defaults */
+html, body { font-family: 'Inter', system-ui, sans-serif; }
+
+body { @apply bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100; }
+
+/* Optional: smoother dark transition */
+.dark * { transition-property: background-color, border-color, color, fill, stroke; transition-duration: 150ms; }
