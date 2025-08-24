@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-  "build": "npm install && vite build",
+  "build": "vite build",
     "preview": "vite preview",
     "server": "node server.js",
     "start": "node server.js",
@@ -13,7 +13,7 @@
     "postinstall": "node -e \"console.log('postinstall complete')\""
   },
   "engines": {
-    "node": ">=20"
+    "node": "20.x"
   },
   "dependencies": {
     "cloudinary": "^1.41.3",
