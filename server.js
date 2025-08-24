@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 import multer from 'multer';
 import cloudinary from 'cloudinary';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
 
@@ -56,4 +58,18 @@ app.post('/api/cloudinary/signature', (req,res) => {
 });
 
 const port = process.env.PORT || 4000;
+// Serve built frontend (Vite output) if present
+try {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const distPath = path.join(__dirname, 'dist');
+  app.use(express.static(distPath));
+  // SPA fallback (after API routes so API 404s are not hijacked)
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    return res.sendFile(path.join(distPath, 'index.html'));
+  });
+} catch (e) {
+  console.warn('Static serve setup skipped:', e.message);
+}
+
 app.listen(port, () => console.log('Server listening on', port));
