@@ -1,5 +1,6 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { hasMasterPassword, createMasterPassword, unlockWithPassword, encryptArrayBuffer } from './services/crypto.js';
+import { getClientConfig } from './services/clientConfig.js';
 import { db, auth, rtdb } from './firebase.js';
 import { collection, addDoc, getDocs, query, where, orderBy, deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
@@ -390,8 +391,7 @@ const App = () => {
         let cloudinaryId = null;
         let cloudErrMsg = null;
         try {
-          const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME;
-          const unsignedPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET;
+          const { cloudName, uploadPreset: unsignedPreset } = await getClientConfig();
           if (cloudName && unsignedPreset) {
             const binary = atob(encrypted.data);
             const bytes = new Uint8Array(binary.length); for (let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
@@ -485,8 +485,7 @@ const App = () => {
       let cloudinaryId = null;
       let cloudErrMsg = null;
       try {
-        const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME;
-        const unsignedPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET;
+        const { cloudName, uploadPreset: unsignedPreset } = await getClientConfig();
         if (cloudName && unsignedPreset) {
           const binary = atob(encrypted.data);
           const bytes = new Uint8Array(binary.length); for (let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
@@ -580,8 +579,7 @@ const App = () => {
       // Optional Cloudinary upload for legacy replacement
       let cloudinaryId = null;
       try {
-        const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME;
-        const unsignedPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET;
+        const { cloudName, uploadPreset: unsignedPreset } = await getClientConfig();
         if (cloudName && unsignedPreset) {
           const binary = atob(encrypted.data);
           const bytes = new Uint8Array(binary.length); for (let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
@@ -683,8 +681,7 @@ const App = () => {
   // Backfill existing encrypted file to Cloudinary if it lacks cloudinaryId
   const backfillCloudinary = async (file) => {
     if (file.cloudinaryId || !file.data || !file.iv) return;
-    const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME;
-    const unsignedPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET;
+  const { cloudName, uploadPreset: unsignedPreset } = await getClientConfig();
     if (!cloudName || !unsignedPreset) { showNotificationMessage('Set Cloudinary env vars first','error'); return; }
     // Mark uploading for visual feedback
     setUploadedFiles(prev => prev.map(f => f.id === file.id ? { ...f, uploading:true } : f));

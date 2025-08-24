@@ -36,6 +36,14 @@ process.on('uncaughtException', (err) => {
 // Health check
 app.get('/api/health', (_req,res)=> res.json({ ok:true, time: Date.now() }));
 
+// Runtime client configuration (avoids rebuild for changing Cloudinary values)
+app.get('/api/client-config', (req, res) => {
+  res.json({
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || null,
+    uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || null
+  });
+});
+
 // Proxy Cloudinary raw uploads
 app.post('/api/cloudinary/upload', upload.single('file'), (req, res) => {
   try {
