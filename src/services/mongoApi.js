@@ -11,9 +11,13 @@ async function json(res){
   return res.json();
 }
 
+let authToken = null;
+export function setAuthToken(t){ authToken = t; }
 async function doFetch(url, options){
   try {
-    return await json(await fetch(url, options));
+  const headers = { ...(options && options.headers ? options.headers : {}) };
+  if(authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  return await json(await fetch(url, { ...(options||{}), headers }));
   } catch (e){
     console.error('[mongoApi]', options?.method||'GET', url, e.message);
     throw e;
@@ -40,4 +44,15 @@ export async function listActivity(email, limit=25){
 }
 export async function mongoStatus(){
   return doFetch(base + '/api/mongo/status');
+}
+
+// Auth endpoints
+export async function registerUser({ email, phone, password }){
+  return doFetch(base + '/api/register', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ email, phone, password }) });
+}
+export async function loginUser({ email, password }){
+  return doFetch(base + '/api/login', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ email, password }) });
+}
+export async function forgotReset({ email, phone, newPassword }){
+  return doFetch(base + '/api/forgot/reset', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ email, phone, newPassword }) });
 }
