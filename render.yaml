@@ -3,7 +3,8 @@ services:
     name: safe-vault
     env: node
     plan: free
-    buildCommand: npm run render-build
+    # Force a clean dependency install before building to avoid stale cache issues (missing modules like mongodb)
+    buildCommand: npm ci && npm run render-build
     startCommand: npm run start
     autoDeploy: true
     envVars:
@@ -13,7 +14,14 @@ services:
         sync: false
       - key: CLOUDINARY_API_SECRET
         sync: false
-      - key: VITE_API_BASE_URL
+      - key: CLOUDINARY_UPLOAD_PRESET
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        sync: false
+      - key: JWT_SECRET
         sync: false
       - key: NODE_ENV
-        value: development
+        value: production
+    # NOTE: Set the above secrets in the Render dashboard (Environment tab). Do NOT commit actual values.
