@@ -9,6 +9,17 @@ import { fileURLToPath } from 'url';
 import morgan from 'morgan';
 import { Readable } from 'stream';
 import fs from 'fs';
+import { MongoClient, ObjectId } from 'mongodb';
+dotenv.config();
+
+const serverApp = express();
+serverApp.use(cors());
+serverApp.use(express.json({ limit: '2mb' }));
+serverApp.use(morgan(process.env.LOG_FORMAT || 'dev'));
+
+// Capture unhandled errors
+process.on('unhandledRejection', (err) => { console.error('[unhandledRejection]', err); });
+process.on('uncaughtException', (err) => { console.error('[uncaughtException]', err); });
 
 // ---------------- User / Key Management (experimental) ----------------
 // This implements a transitional server-assisted model while attempting to keep
@@ -51,7 +62,7 @@ function unwrapDEK(wrapped, wrapKey){
 }
 
 // POST /api/register { email, phone, password }
-app.post('/api/register', async (req,res)=>{
+serverApp.post('/api/register', async (req,res)=>{
   try {
     const { email, phone, password } = req.body || {};
     if(!email || !phone || !password) return res.status(400).json({ error:'Missing fields' });
@@ -74,7 +85,7 @@ app.post('/api/register', async (req,res)=>{
 });
 
 // POST /api/login { email, password }
-app.post('/api/login', async (req,res)=>{
+serverApp.post('/api/login', async (req,res)=>{
   try {
     const { email, password } = req.body || {};
     const user = findUser(email);
@@ -94,7 +105,7 @@ function authMiddleware(req,res,next){
 }
 
 // POST /api/change-password { currentPassword, newPassword }
-app.post('/api/change-password', authMiddleware, async (req,res)=>{
+serverApp.post('/api/change-password', authMiddleware, async (req,res)=>{
   try {
     const { currentPassword, newPassword } = req.body || {};
     if(!currentPassword || !newPassword) return res.status(400).json({ error:'Missing fields' });
@@ -118,7 +129,7 @@ app.post('/api/change-password', authMiddleware, async (req,res)=>{
 });
 
 // POST /api/forgot/reset { email, phone, recoveryKey, newPassword }
-app.post('/api/forgot/reset', async (req,res)=>{
+serverApp.post('/api/forgot/reset', async (req,res)=>{
   try {
     const { email, phone, recoveryKey, newPassword } = req.body || {};
     if(!email || !phone || !recoveryKey || !newPassword) return res.status(400).json({ error:'Missing fields' });
@@ -142,8 +153,6 @@ app.post('/api/forgot/reset', async (req,res)=>{
   } catch(e){ console.error(e); res.status(500).json({ error:'Reset failed' }); }
 });
 
-dotenv.config();
-
 cloudinary.v2.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -151,26 +160,79 @@ cloudinary.v2.config({
 });
 const upload = multer({ storage: multer.memoryStorage() });
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '2mb' }));
-
-// Basic request logging (combined for detailed info in production)
-app.use(morgan(process.env.LOG_FORMAT || 'dev'));
-
-// Capture unhandled errors
-process.on('unhandledRejection', (err) => {
-  console.error('[unhandledRejection]', err);
-});
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err);
-});
-
 // Health check
-app.get('/api/health', (_req,res)=> res.json({ ok:true, time: Date.now() }));
+serverApp.get('/api/health', (_req,res)=> res.json({ ok:true, time: Date.now() }));
+// Mongo connection status
+serverApp.get('/api/mongo/status', (_req,res)=>{
+  res.json({ ok:true, connected: !!filesCol });
+});
+
+// ---------------- MongoDB Setup (replacing Firebase) ----------------
+const mongoUri = process.env.MONGODB_URI || null; // set in env
+let mongoClient; let filesCol; let activityCol;
+async function initMongo(){
+  if(!mongoUri){ console.warn('MONGODB_URI not set; Mongo features disabled'); return; }
+  try {
+    mongoClient = new MongoClient(mongoUri, { maxPoolSize: 5 });
+    await mongoClient.connect();
+    const dbName = process.env.MONGODB_DB || 'safe_vault';
+    const db = mongoClient.db(dbName);
+    filesCol = db.collection('files');
+    activityCol = db.collection('activity');
+    await filesCol.createIndex({ email:1, createdAt:-1 });
+    await activityCol.createIndex({ email:1, ts:-1 });
+    console.log('MongoDB connected');
+  } catch(e){ console.error('Mongo connect failed', e.message); }
+}
+initMongo();
+
+// List files
+serverApp.get('/api/files', async (req,res)=>{
+  try {
+    if(!filesCol) return res.json({ ok:true, files:[] });
+    const email = req.query.email || 'anonymous';
+    const docs = await filesCol.find({ email }).sort({ createdAt:-1 }).toArray();
+    res.json({ ok:true, files: docs });
+  } catch(e){ res.status(500).json({ error:'List failed' }); }
+});
+// Create file metadata
+serverApp.post('/api/files', async (req,res)=>{
+  try {
+    if(!filesCol) return res.status(503).json({ error:'Storage not ready' });
+    const { email='anonymous', name, category, size, date, type, iv, data, mime, cloudinaryId, rawBytes, createdAt } = req.body || {};
+    if(!name || !iv || !data) return res.status(400).json({ error:'Missing fields'});
+    const doc = { email, name, category, size, date, type, iv, data, mime, cloudinaryId: cloudinaryId||null, rawBytes, createdAt: createdAt||Date.now() };
+    const r = await filesCol.insertOne(doc);
+    res.json({ ok:true, id: r.insertedId, file: { ...doc, _id: r.insertedId } });
+  } catch(e){ res.status(500).json({ error:'Create failed' }); }
+});
+// Update file (e.g., add cloudinaryId)
+serverApp.patch('/api/files/:id', async (req,res)=>{
+  try {
+    if(!filesCol) return res.status(503).json({ error:'Storage not ready' });
+    const { id } = req.params; const patch = req.body || {};
+    await filesCol.updateOne({ _id: new ObjectId(id) }, { $set: patch });
+    res.json({ ok:true });
+  } catch(e){ res.status(500).json({ error:'Update failed' }); }
+});
+// Delete file
+serverApp.delete('/api/files/:id', async (req,res)=>{
+  try {
+    if(!filesCol) return res.status(503).json({ error:'Storage not ready' });
+    const { id } = req.params; await filesCol.deleteOne({ _id: new ObjectId(id) });
+    res.json({ ok:true });
+  } catch(e){ res.status(500).json({ error:'Delete failed' }); }
+});
+// Activity log endpoints
+serverApp.post('/api/activity', async (req,res)=>{
+  try { if(!activityCol) return res.status(503).json({ error:'Activity not ready'}); const entry = { ...(req.body||{}), ts: Date.now() }; await activityCol.insertOne(entry); res.json({ ok:true }); } catch(e){ res.status(500).json({ error:'Act add failed'}); }
+});
+serverApp.get('/api/activity', async (req,res)=>{
+  try { if(!activityCol) return res.json({ ok:true, activity:[] }); const email = req.query.email||'anonymous'; const lim = Math.min(parseInt(req.query.limit)||25, 200); const list = await activityCol.find({ email }).sort({ ts:-1 }).limit(lim).toArray(); res.json({ ok:true, activity:list }); } catch(e){ res.status(500).json({ error:'Act list failed'}); }
+});
 
 // Runtime client configuration (avoids rebuild for changing Cloudinary values)
-app.get('/api/client-config', (req, res) => {
+serverApp.get('/api/client-config', (req, res) => {
   res.json({
     cloudName: process.env.CLOUDINARY_CLOUD_NAME || null,
     uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || null
@@ -178,7 +240,7 @@ app.get('/api/client-config', (req, res) => {
 });
 
 // Proxy Cloudinary raw uploads
-app.post('/api/cloudinary/upload', upload.single('file'), (req, res) => {
+serverApp.post('/api/cloudinary/upload', upload.single('file'), (req, res) => {
   try {
     const { upload_preset, folder, resource_type } = req.body || {};
     if (!req.file) return res.status(400).json({ error: 'Missing file' });
@@ -211,7 +273,7 @@ app.post('/api/cloudinary/upload', upload.single('file'), (req, res) => {
 });
 
 // Cloudinary signature endpoint (for signed uploads if you switch from unsigned)
-app.post('/api/cloudinary/signature', (req,res) => {
+serverApp.post('/api/cloudinary/signature', (req,res) => {
   const { timestamp = Math.floor(Date.now()/1000), folder = 'vault', public_id } = req.body || {};
   const paramsToSign = { folder, timestamp, ...(public_id ? { public_id } : {}) };
   const sorted = Object.keys(paramsToSign).sort().map(k => `${k}=${paramsToSign[k]}`).join('&');
@@ -226,9 +288,9 @@ const port = process.env.PORT || 4000;
 try {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const distPath = path.join(__dirname, 'dist');
-  app.use(express.static(distPath));
+  serverApp.use(express.static(distPath));
   // SPA fallback (after API routes so API 404s are not hijacked)
-  app.get('*', (req, res, next) => {
+  serverApp.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next();
     return res.sendFile(path.join(distPath, 'index.html'));
   });
@@ -238,9 +300,9 @@ try {
 
 // Generic error handler (keep last)
 // eslint-disable-next-line no-unused-vars
-app.use((err, _req, res, _next) => {
+serverApp.use((err, _req, res, _next) => {
   console.error('[express.error]', err);
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-app.listen(port, () => console.log('Server listening on', port));
+serverApp.listen(port, () => console.log('Server listening on', port));
