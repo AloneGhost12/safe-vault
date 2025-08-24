@@ -162,16 +162,27 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // Health check
 serverApp.get('/api/health', (_req,res)=> res.json({ ok:true, time: Date.now() }));
-// Mongo connection status
+// Mongo connection status (augmented below once state tracking added)
 serverApp.get('/api/mongo/status', (_req,res)=>{
-  res.json({ ok:true, connected: !!filesCol });
+  res.json({ ok:true, connected: !!filesCol, state: mongoState.state, error: mongoState.error, attempts: mongoState.attempts });
 });
 
 // ---------------- MongoDB Setup (replacing Firebase) ----------------
 const mongoUri = process.env.MONGODB_URI || null; // set in env
 let mongoClient; let filesCol; let activityCol;
+const mongoState = { state: 'init', error: null, attempts: 0, nextRetryMs: 0 };
+const MAX_ATTEMPTS = 8;
 async function initMongo(){
-  if(!mongoUri){ console.warn('MONGODB_URI not set; Mongo features disabled'); return; }
+  if(!mongoUri){
+    mongoState.state = 'missing-env';
+    mongoState.error = 'MONGODB_URI not set';
+    console.warn('MONGODB_URI not set; Mongo features disabled');
+    return;
+  }
+  if(mongoState.state === 'connected') return;
+  mongoState.state = 'connecting';
+  mongoState.error = null;
+  mongoState.attempts++;
   try {
     mongoClient = new MongoClient(mongoUri, { maxPoolSize: 5 });
     await mongoClient.connect();
@@ -181,9 +192,23 @@ async function initMongo(){
     activityCol = db.collection('activity');
     await filesCol.createIndex({ email:1, createdAt:-1 });
     await activityCol.createIndex({ email:1, ts:-1 });
+    mongoState.state = 'connected';
     console.log('MongoDB connected');
-  } catch(e){ console.error('Mongo connect failed', e.message); }
+  } catch(e){
+    mongoState.state = 'error';
+    mongoState.error = e.message || 'connect failed';
+    console.error('Mongo connect failed', e.message);
+    if(mongoState.attempts < MAX_ATTEMPTS){
+      const delay = Math.min(30000, 1000 * Math.pow(2, mongoState.attempts));
+      mongoState.nextRetryMs = Date.now() + delay;
+      setTimeout(initMongo, delay);
+      console.log(`Retrying Mongo in ${delay}ms (attempt ${mongoState.attempts+1}/${MAX_ATTEMPTS})`);
+    } else {
+      console.error('Mongo giving up after max attempts');
+    }
+  }
 }
+// Kick off initial connect attempt
 initMongo();
 
 // List files
