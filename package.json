@@ -3,17 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
-  "prebuild": "npm ci",
-  "dev": "vite",
-  "build": "vite build",
+    "prebuild": "npm ci",
+    "dev": "vite",
+    "build": "vite build",
     "preview": "vite preview",
     "server": "node server.js",
     "start": "node server.js",
     "postinstall": "node -e \"console.log('postinstall complete')\""
-  },
-  "engines": {
-    "node": "20.x"
   },
   "dependencies": {
     "cloudinary": "^1.41.3",
