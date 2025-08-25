@@ -1,0 +1,20 @@
+[
+  {
+    "email": "test@example.com",
+    "phoneHash": "$2a$10$10ENn50g1mmFNJhA.u1SNu4hjTgq9zdS.jLZU4hAXcmELmO/oRxBi",
+    "pwHash": "$2a$12$mPoUc5hOTvT5S7Ru5t0erO//VgBFZarzh7EZpr.76oL3IV3Z1FHJC",
+    "kdfSalt": "n053/diULheECq1gSfcPbQ==",
+    "kdfIterations": 310000,
+    "wrappedDEK_pw": {
+      "iv": "Kdl9MJxDPjEA1MJ5",
+      "ct": "KPdp2ATVzvH4FqeW3hIs1zJDsbUJvVsYiae3bgJOnuI=",
+      "tag": "vMHH3t64hR+c11Av1ofevQ=="
+    },
+    "wrappedDEK_rk": {
+      "iv": "vowUK/9WmYeOqV62",
+      "ct": "aTN5VH2qCJT7hUMG9BTShfqULLrnfluCWB92v31iFPQ=",
+      "tag": "cAMpl1WU3DPLMrYrVhVd3w=="
+    },
+    "createdAt": 1756091966830
+  }
+]
