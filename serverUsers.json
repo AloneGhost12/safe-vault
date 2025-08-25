@@ -16,5 +16,23 @@
       "tag": "vFd42rR5QsCjfrcF8zJT7w=="
     },
     "createdAt": 1756091672022
+  },
+  {
+    "email": "demo@example.com",
+    "phoneHash": "$2a$10$q0.C9fLyiCkHpiRk68DPDOxZyFYIN3qqhQq6DmBdf0cx3GlK.dU/W",
+    "pwHash": "$2a$12$BIMOV4FXbKiicvSjqZ/wK.JcVJ4fKH/L4IRKFbtl3M5.ccED6/6Ri",
+    "kdfSalt": "fudJHHUb0u1Ju3XSnN8Ybg==",
+    "kdfIterations": 310000,
+    "wrappedDEK_pw": {
+      "iv": "f2THIfMJKsGMIqpx",
+      "ct": "UPb3hNQQ3ZIxk/rDYilBBI+4Nz8F1qu7JemUxOxejFk=",
+      "tag": "LutGL4fj+XZCAFXkoM5Pdw=="
+    },
+    "wrappedDEK_rk": {
+      "iv": "T6tCZuot9YIUlsTt",
+      "ct": "4yc5cPDoAflnyZQAtsH1EhiqFl5pSWDHmJb9RG/X2xA=",
+      "tag": "8oPL5B51NXizslKOVtEqWQ=="
+    },
+    "createdAt": 1756091788962
   }
 ]
