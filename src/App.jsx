@@ -1,7 +1,8 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { hasMasterPassword, createMasterPassword, unlockWithPassword, encryptArrayBuffer } from './services/crypto.js';
 import { getClientConfig } from './services/clientConfig.js';
-import { listFiles, createFile, deleteFile as deleteFileApi, patchFile, addActivity, listActivity, mongoStatus } from './services/mongoApi.js';
+import { listFiles, createFile, deleteFile as deleteFileApi, patchFile, addActivity, listActivity, mongoStatus, registerUser, loginUser, setAuthToken } from './services/mongoApi.js';
+import { loadAuthMeta, storeAuthMeta, clearAuthMeta, hasAuthMeta, decryptWrappedDEK } from './services/auth.js';
 
 const App = () => {
   // State management
@@ -33,10 +34,21 @@ const App = () => {
   const fileInputRef = useRef(null);
   const legacyReuploadInputRef = useRef(null);
 
-  // Auth state for master password
-  const [authState, setAuthState] = useState({ unlocked: false, loading: false, error: '', step: 'init' });
-  const [passwordInput, setPasswordInput] = useState('');
-  const [passwordConfirm, setPasswordConfirm] = useState('');
+  // Auth state for server-first authentication
+  const [authState, setAuthState] = useState({ 
+    unlocked: false, 
+    mode: 'signin', // 'signin' | 'signup'
+    stage: 'form', // 'form' | 'showRecovery'
+    working: false, 
+    error: '' 
+  });
+  const [authForm, setAuthForm] = useState({
+    email: '',
+    phone: '',
+    password: '',
+    confirmPassword: ''
+  });
+  const [recoveryKey, setRecoveryKey] = useState('');
   const [contentKey, setContentKey] = useState(null);
   const [persistedLoaded, setPersistedLoaded] = useState(false);
 
@@ -116,10 +128,15 @@ const App = () => {
   }, [uploadedFiles, authState.unlocked]);
 
   useEffect(() => {
-    if (hasMasterPassword()) {
-      setAuthState(a => ({ ...a, step: 'unlock' }));
+    // Initialize auth state based on stored metadata
+    const authMeta = loadAuthMeta();
+    if (authMeta) {
+      // User has registered before, show sign-in form
+      setAuthState(prev => ({ ...prev, mode: 'signin' }));
+      setAuthForm(prev => ({ ...prev, email: authMeta.email }));
     } else {
-      setAuthState(a => ({ ...a, step: 'create' }));
+      // No previous registration, show sign-up form
+      setAuthState(prev => ({ ...prev, mode: 'signup' }));
     }
   }, []);
   // Mongo status + initial loads when unlocked
@@ -180,45 +197,164 @@ const App = () => {
     setLoadingFiles(false);
   };
 
+  // New server-first authentication handlers
+  const handleRegister = async () => {
+    if (!authForm.email || !authForm.phone || !authForm.password) {
+      setAuthState(prev => ({ ...prev, error: 'All fields are required' }));
+      return;
+    }
+    if (authForm.password.length < 8) {
+      setAuthState(prev => ({ ...prev, error: 'Password must be at least 8 characters' }));
+      return;
+    }
+    if (authForm.password !== authForm.confirmPassword) {
+      setAuthState(prev => ({ ...prev, error: 'Passwords do not match' }));
+      return;
+    }
+    
+    try {
+      setAuthState(prev => ({ ...prev, working: true, error: '' }));
+      
+      const response = await registerUser({
+        email: authForm.email,
+        phone: authForm.phone,
+        password: authForm.password
+      });
+      
+      // Store JWT token
+      setAuthToken(response.token);
+      
+      // Store auth metadata 
+      storeAuthMeta({
+        email: authForm.email,
+        kdfSalt: response.kdfSalt,
+        kdfIterations: response.kdfIterations,
+        wrappedDEK_pw: response.wrappedDEK_pw
+      });
+      
+      // Show recovery key
+      setRecoveryKey(response.recoveryKey);
+      setAuthState(prev => ({ ...prev, stage: 'showRecovery', working: false }));
+      
+    } catch (e) {
+      setAuthState(prev => ({ ...prev, error: e.message, working: false }));
+    }
+  };
+
+  const handleLogin = async () => {
+    if (!authForm.email || !authForm.password) {
+      setAuthState(prev => ({ ...prev, error: 'Email and password are required' }));
+      return;
+    }
+    
+    try {
+      setAuthState(prev => ({ ...prev, working: true, error: '' }));
+      
+      const response = await loginUser({
+        email: authForm.email,
+        password: authForm.password
+      });
+      
+      // Store JWT token
+      setAuthToken(response.token);
+      
+      // Update stored auth metadata
+      storeAuthMeta({
+        email: authForm.email,
+        kdfSalt: response.kdfSalt,
+        kdfIterations: response.kdfIterations,
+        wrappedDEK_pw: response.wrappedDEK_pw
+      });
+      
+      // Derive wrap key and unlock DEK
+      const authMeta = loadAuthMeta();
+      const contentKey = await decryptWrappedDEK(authForm.password, authMeta);
+      setContentKey(contentKey);
+      
+      setAuthState({ unlocked: true, mode: 'signin', stage: 'form', working: false, error: '' });
+      showNotificationMessage('Successfully signed in', 'success');
+      
+      // Clear form
+      setAuthForm({ email: '', phone: '', password: '', confirmPassword: '' });
+      
+    } catch (e) {
+      setAuthState(prev => ({ ...prev, error: e.message, working: false }));
+    }
+  };
+
+  const handleRecoveryConfirmed = async () => {
+    try {
+      // User has seen the recovery key, now unlock the vault
+      const authMeta = loadAuthMeta();
+      const contentKey = await decryptWrappedDEK(authForm.password, authMeta);
+      setContentKey(contentKey);
+      
+      setAuthState({ unlocked: true, mode: 'signup', stage: 'form', working: false, error: '' });
+      showNotificationMessage('Account created and vault unlocked', 'success');
+      
+      // Clear sensitive data
+      setRecoveryKey('');
+      setAuthForm({ email: '', phone: '', password: '', confirmPassword: '' });
+      
+    } catch (e) {
+      setAuthState(prev => ({ ...prev, error: e.message }));
+    }
+  };
+
+  const handleLogout = () => {
+    setAuthToken(null);
+    clearAuthMeta();
+    setContentKey(null);
+    setAuthState({ unlocked: false, mode: 'signin', stage: 'form', working: false, error: '' });
+    setAuthForm({ email: '', phone: '', password: '', confirmPassword: '' });
+    showNotificationMessage('Signed out', 'success');
+  };
+
+  const handleLock = () => {
+    // Lock vault but keep auth metadata (user can unlock again with password)
+    setContentKey(null);
+    setAuthState(prev => ({ ...prev, unlocked: false, stage: 'form' }));
+    const authMeta = loadAuthMeta();
+    if (authMeta) {
+      setAuthForm(prev => ({ ...prev, email: authMeta.email, password: '', confirmPassword: '', phone: '' }));
+    }
+    showNotificationMessage('Vault locked', 'success');
+  };
+
+  // Legacy handlers (kept for potential fallback)
   const handleCreatePassword = async () => {
-    if (passwordInput.length < 8) {
+    if (authForm.password.length < 8) {
       setAuthState(a => ({ ...a, error: 'Password must be at least 8 characters' }));
       return;
     }
-    if (passwordInput !== passwordConfirm) {
+    if (authForm.password !== authForm.confirmPassword) {
       setAuthState(a => ({ ...a, error: 'Passwords do not match' }));
       return;
     }
     try {
-      setAuthState(a => ({ ...a, loading: true, error: '' }));
-      const key = await createMasterPassword(passwordInput);
+      setAuthState(a => ({ ...a, working: true, error: '' }));
+      const key = await createMasterPassword(authForm.password);
       setContentKey(key);
-      setAuthState({ unlocked: true, loading: false, error: '', step: 'unlocked' });
+      setAuthState({ unlocked: true, working: false, error: '', mode: 'legacy', stage: 'form' });
       showNotificationMessage('Master password created', 'success');
-      setPasswordInput(''); setPasswordConfirm('');
+      setAuthForm({ email: '', phone: '', password: '', confirmPassword: '' });
     } catch (e) {
-      setAuthState(a => ({ ...a, error: e.message, loading: false }));
+      setAuthState(a => ({ ...a, error: e.message, working: false }));
     }
   };
 
   const handleUnlock = async () => {
-    if (!passwordInput) return;
+    if (!authForm.password) return;
     try {
-      setAuthState(a => ({ ...a, loading: true, error: '' }));
-      const key = await unlockWithPassword(passwordInput);
+      setAuthState(a => ({ ...a, working: true, error: '' }));
+      const key = await unlockWithPassword(authForm.password);
       setContentKey(key);
-      setAuthState({ unlocked: true, loading: false, error: '', step: 'unlocked' });
+      setAuthState({ unlocked: true, working: false, error: '', mode: 'legacy', stage: 'form' });
       showNotificationMessage('Vault unlocked', 'success');
-      setPasswordInput('');
+      setAuthForm(prev => ({ ...prev, password: '' }));
     } catch (e) {
-      setAuthState(a => ({ ...a, error: e.message, loading: false }));
+      setAuthState(a => ({ ...a, error: e.message, working: false }));
     }
-  };
-
-  const handleLock = () => {
-    setContentKey(null);
-    setAuthState(a => ({ ...a, unlocked: false, step: hasMasterPassword() ? 'unlock' : 'create' }));
-    showNotificationMessage('Vault locked', 'success');
   };
 
   // Format file size
@@ -712,29 +848,121 @@ const App = () => {
       {!authState.unlocked && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/80 px-4">
           <div className="w-full max-w-md bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 p-6">
-            <div className="flex items-center mb-4">
-              <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white mr-3"><i className="fas fa-shield-alt"></i></div>
-              <h2 className="text-xl font-semibold">{authState.step === 'create' ? 'Create Master Password' : 'Unlock Vault'}</h2>
-            </div>
-            {authState.error && <div className="mb-4 text-sm text-red-600 bg-red-50 dark:bg-red-900/30 p-2 rounded">{authState.error}</div>}
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-1">Master Password</label>
-                <input type="password" value={passwordInput} onChange={e=>setPasswordInput(e.target.value)} className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700" autoFocus/>
-              </div>
-              {authState.step === 'create' && (
-                <div>
-                  <label className="block text-sm font-medium mb-1">Confirm Password</label>
-                  <input type="password" value={passwordConfirm} onChange={e=>setPasswordConfirm(e.target.value)} className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"/>
+            
+            {authState.stage === 'showRecovery' ? (
+              // Recovery Key Display
+              <>
+                <div className="flex items-center mb-4">
+                  <div className="w-10 h-10 bg-green-600 rounded-lg flex items-center justify-center text-white mr-3"><i className="fas fa-key"></i></div>
+                  <h2 className="text-xl font-semibold">Save Your Recovery Key</h2>
                 </div>
-              )}
-              <button disabled={authState.loading} onClick={authState.step==='create'?handleCreatePassword:handleUnlock} className="w-full inline-flex justify-center items-center px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-60">
-                {authState.loading && <i className="fas fa-circle-notch fa-spin mr-2"/>}
-                {authState.step==='create' ? 'Set Password & Unlock' : 'Unlock'}
-              </button>
-            </div>
-            {authState.step==='unlock' && <p className="mt-4 text-xs text-gray-500">Your password never leaves this device. Key is derived locally (PBKDF2).</p>}
-            {authState.step==='create' && <p className="mt-4 text-xs text-gray-500">Store this password safely. It cannot be recovered if lost.</p>}
+                <div className="mb-4 p-4 bg-yellow-50 dark:bg-yellow-900/30 rounded-lg border border-yellow-200 dark:border-yellow-700">
+                  <p className="text-sm text-yellow-800 dark:text-yellow-200 mb-2">
+                    <i className="fas fa-exclamation-triangle mr-2"></i>
+                    This recovery key will only be shown once. Save it securely!
+                  </p>
+                  <div className="bg-white dark:bg-gray-800 p-3 rounded border font-mono text-sm break-all">
+                    {recoveryKey}
+                  </div>
+                </div>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                  You can use this recovery key to reset your password if you forget it. Store it in a safe place separate from your password.
+                </p>
+                <button 
+                  onClick={handleRecoveryConfirmed}
+                  className="w-full px-4 py-2 rounded-md bg-green-600 hover:bg-green-700 text-white font-medium"
+                >
+                  I've Saved My Recovery Key - Continue
+                </button>
+              </>
+            ) : (
+              // Sign In / Sign Up Form
+              <>
+                <div className="flex items-center mb-4">
+                  <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white mr-3"><i className="fas fa-shield-alt"></i></div>
+                  <h2 className="text-xl font-semibold">{authState.mode === 'signup' ? 'Create Account' : 'Sign In'}</h2>
+                </div>
+                
+                {authState.error && <div className="mb-4 text-sm text-red-600 bg-red-50 dark:bg-red-900/30 p-2 rounded">{authState.error}</div>}
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Email</label>
+                    <input 
+                      type="email" 
+                      value={authForm.email} 
+                      onChange={e=>setAuthForm(prev => ({...prev, email: e.target.value}))} 
+                      className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700" 
+                      autoFocus
+                    />
+                  </div>
+                  
+                  {authState.mode === 'signup' && (
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Phone Number</label>
+                      <input 
+                        type="tel" 
+                        value={authForm.phone} 
+                        onChange={e=>setAuthForm(prev => ({...prev, phone: e.target.value}))} 
+                        className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"
+                        placeholder="For account recovery"
+                      />
+                    </div>
+                  )}
+                  
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Password</label>
+                    <input 
+                      type="password" 
+                      value={authForm.password} 
+                      onChange={e=>setAuthForm(prev => ({...prev, password: e.target.value}))} 
+                      className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"
+                    />
+                  </div>
+                  
+                  {authState.mode === 'signup' && (
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Confirm Password</label>
+                      <input 
+                        type="password" 
+                        value={authForm.confirmPassword} 
+                        onChange={e=>setAuthForm(prev => ({...prev, confirmPassword: e.target.value}))} 
+                        className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"
+                      />
+                    </div>
+                  )}
+                  
+                  <button 
+                    disabled={authState.working} 
+                    onClick={authState.mode === 'signup' ? handleRegister : handleLogin}
+                    className="w-full inline-flex justify-center items-center px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-60"
+                  >
+                    {authState.working && <i className="fas fa-circle-notch fa-spin mr-2"/>}
+                    {authState.mode === 'signup' ? 'Create Account' : 'Sign In'}
+                  </button>
+                  
+                  <div className="text-center">
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setAuthState(prev => ({ ...prev, mode: prev.mode === 'signup' ? 'signin' : 'signup', error: '' }));
+                        setAuthForm({ email: '', phone: '', password: '', confirmPassword: '' });
+                      }}
+                      className="text-blue-600 hover:text-blue-800 text-sm"
+                    >
+                      {authState.mode === 'signup' ? 'Already have an account? Sign In' : 'Need an account? Sign Up'}
+                    </button>
+                  </div>
+                </div>
+                
+                <p className="mt-4 text-xs text-gray-500">
+                  {authState.mode === 'signup' ? 
+                    'Your password encrypts your data end-to-end. We cannot recover it if lost.' :
+                    'Your password stays on this device and decrypts your data locally.'
+                  }
+                </p>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -834,7 +1062,23 @@ const App = () => {
                 </button>
               </nav>
             </div>
-            <div className="flex items-center">
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={handleLock}
+                className="p-2 rounded-full text-gray-500 dark:text-gray-300 hover:text-gray-700 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors"
+                aria-label="Lock vault"
+                title="Lock vault"
+              >
+                <i className="fas fa-lock"></i>
+              </button>
+              <button
+                onClick={handleLogout}
+                className="p-2 rounded-full text-gray-500 dark:text-gray-300 hover:text-gray-700 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors"
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <i className="fas fa-sign-out-alt"></i>
+              </button>
               <button
                 onClick={() => setDarkMode(!darkMode)}
                 className="p-2 rounded-full text-gray-500 dark:text-gray-300 hover:text-gray-700 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors"
