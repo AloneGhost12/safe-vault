@@ -1,7 +1,8 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
-import { hasMasterPassword, createMasterPassword, unlockWithPassword, encryptArrayBuffer } from './services/crypto.js';
+import { encryptArrayBuffer } from './services/crypto.js';
 import { getClientConfig } from './services/clientConfig.js';
-import { listFiles, createFile, deleteFile as deleteFileApi, patchFile, addActivity, listActivity, mongoStatus } from './services/mongoApi.js';
+import { listFiles, createFile, deleteFile as deleteFileApi, patchFile, addActivity, listActivity, mongoStatus, registerUser, loginUser, setAuthToken } from './services/mongoApi.js';
+import { loadAuthMeta, storeAuthMeta, clearAuthMeta, decryptWrappedDEK } from './services/auth.js';
 
 const App = () => {
   // State management
@@ -33,10 +34,21 @@ const App = () => {
   const fileInputRef = useRef(null);
   const legacyReuploadInputRef = useRef(null);
 
-  // Auth state for master password
-  const [authState, setAuthState] = useState({ unlocked: false, loading: false, error: '', step: 'init' });
-  const [passwordInput, setPasswordInput] = useState('');
-  const [passwordConfirm, setPasswordConfirm] = useState('');
+  // Auth state for unified server-first authentication
+  const [authState, setAuthState] = useState({ 
+    unlocked: false, 
+    mode: 'login', // 'login' | 'register'
+    stage: 'form', // 'form' | 'showRecovery' 
+    working: false, 
+    error: '' 
+  });
+  const [authForm, setAuthForm] = useState({
+    email: '',
+    phone: '',
+    password: '',
+    passwordConfirm: ''
+  });
+  const [recoveryKey, setRecoveryKey] = useState('');
   const [contentKey, setContentKey] = useState(null);
   const [persistedLoaded, setPersistedLoaded] = useState(false);
 
@@ -63,6 +75,7 @@ const App = () => {
   const [legacyReuploadTarget, setLegacyReuploadTarget] = useState(null);
   const [cloudinaryErrors, setCloudinaryErrors] = useState({}); // { fileId: message }
   const [lastCloudinaryError, setLastCloudinaryError] = useState(null);
+  const [showUserMenu, setShowUserMenu] = useState(false); // For header user dropdown
   // Helper to log an activity entry (Mongo)
   const logActivity = async (entry) => {
     try {
@@ -116,12 +129,29 @@ const App = () => {
   }, [uploadedFiles, authState.unlocked]);
 
   useEffect(() => {
-    if (hasMasterPassword()) {
-      setAuthState(a => ({ ...a, step: 'unlock' }));
+    // Check for existing auth metadata on load
+    const authMeta = loadAuthMeta();
+    if (authMeta && authMeta.email) {
+      // User has auth metadata, show login with email prefilled
+      setAuthForm(f => ({ ...f, email: authMeta.email }));
+      setAuthState(a => ({ ...a, mode: 'login' }));
     } else {
-      setAuthState(a => ({ ...a, step: 'create' }));
+      // No auth metadata, show register form
+      setAuthState(a => ({ ...a, mode: 'register' }));
     }
   }, []);
+  
+  // Close user menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (showUserMenu && !event.target.closest('#user-menu-button') && !event.target.closest('.absolute')) {
+        setShowUserMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showUserMenu]);
+  
   // Mongo status + initial loads when unlocked
   // Initial Mongo status + retry until connected (handles race where server connects after first check)
   useEffect(()=>{
@@ -180,45 +210,126 @@ const App = () => {
     setLoadingFiles(false);
   };
 
-  const handleCreatePassword = async () => {
-    if (passwordInput.length < 8) {
+  const handleRegister = async () => {
+    const { email, phone, password, passwordConfirm } = authForm;
+    if (!email || !phone || !password) {
+      setAuthState(a => ({ ...a, error: 'Please fill all fields' }));
+      return;
+    }
+    if (password.length < 8) {
       setAuthState(a => ({ ...a, error: 'Password must be at least 8 characters' }));
       return;
     }
-    if (passwordInput !== passwordConfirm) {
+    if (password !== passwordConfirm) {
       setAuthState(a => ({ ...a, error: 'Passwords do not match' }));
       return;
     }
+    
     try {
-      setAuthState(a => ({ ...a, loading: true, error: '' }));
-      const key = await createMasterPassword(passwordInput);
-      setContentKey(key);
-      setAuthState({ unlocked: true, loading: false, error: '', step: 'unlocked' });
-      showNotificationMessage('Master password created', 'success');
-      setPasswordInput(''); setPasswordConfirm('');
+      setAuthState(a => ({ ...a, working: true, error: '' }));
+      
+      // Call register API
+      const result = await registerUser({ email, phone, password });
+      
+      // Store auth metadata
+      const authMeta = {
+        email: email.toLowerCase(),
+        kdfSalt: result.kdfSalt,
+        kdfIterations: result.kdfIterations,
+        wrappedDEK_pw: result.wrappedDEK_pw
+      };
+      storeAuthMeta(authMeta);
+      
+      // Store token
+      setAuthToken(result.token);
+      
+      // Show recovery key
+      setRecoveryKey(result.recoveryKey);
+      setAuthState(a => ({ ...a, working: false, stage: 'showRecovery' }));
+      
     } catch (e) {
-      setAuthState(a => ({ ...a, error: e.message, loading: false }));
+      setAuthState(a => ({ ...a, working: false, error: e.message || 'Registration failed' }));
     }
   };
 
-  const handleUnlock = async () => {
-    if (!passwordInput) return;
+  const handleLogin = async () => {
+    const { email, password } = authForm;
+    if (!email || !password) {
+      setAuthState(a => ({ ...a, error: 'Please enter email and password' }));
+      return;
+    }
+    
     try {
-      setAuthState(a => ({ ...a, loading: true, error: '' }));
-      const key = await unlockWithPassword(passwordInput);
-      setContentKey(key);
-      setAuthState({ unlocked: true, loading: false, error: '', step: 'unlocked' });
-      showNotificationMessage('Vault unlocked', 'success');
-      setPasswordInput('');
+      setAuthState(a => ({ ...a, working: true, error: '' }));
+      
+      // Call login API
+      const result = await loginUser({ email, password });
+      
+      // Update auth metadata with latest from server
+      const authMeta = {
+        email: email.toLowerCase(),
+        kdfSalt: result.kdfSalt,
+        kdfIterations: result.kdfIterations,
+        wrappedDEK_pw: result.wrappedDEK_pw
+      };
+      storeAuthMeta(authMeta);
+      
+      // Store token
+      setAuthToken(result.token);
+      
+      // Decrypt and import DEK
+      const dek = await decryptWrappedDEK({
+        password,
+        wrapped: result.wrappedDEK_pw,
+        kdfSalt: result.kdfSalt,
+        kdfIterations: result.kdfIterations
+      });
+      
+      setContentKey(dek);
+      setAuthState({ unlocked: true, mode: 'login', stage: 'form', working: false, error: '' });
+      showNotificationMessage('Logged in successfully', 'success');
+      
     } catch (e) {
-      setAuthState(a => ({ ...a, error: e.message, loading: false }));
+      setAuthState(a => ({ ...a, working: false, error: e.message || 'Login failed' }));
+    }
+  };
+
+  const handleRecoveryConfirm = async () => {
+    // User confirmed they saved recovery key, now unlock vault
+    try {
+      const authMeta = loadAuthMeta();
+      if (!authMeta) throw new Error('Auth metadata missing');
+      
+      const dek = await decryptWrappedDEK({
+        password: authForm.password,
+        wrapped: authMeta.wrappedDEK_pw,
+        kdfSalt: authMeta.kdfSalt,
+        kdfIterations: authMeta.kdfIterations
+      });
+      
+      setContentKey(dek);
+      setAuthState({ unlocked: true, mode: 'register', stage: 'form', working: false, error: '' });
+      setRecoveryKey(''); // Clear recovery key from memory
+      showNotificationMessage('Account created and vault unlocked!', 'success');
+      
+    } catch (e) {
+      setAuthState(a => ({ ...a, error: e.message || 'Failed to unlock vault' }));
     }
   };
 
   const handleLock = () => {
     setContentKey(null);
-    setAuthState(a => ({ ...a, unlocked: false, step: hasMasterPassword() ? 'unlock' : 'create' }));
+    setAuthState(a => ({ ...a, unlocked: false }));
     showNotificationMessage('Vault locked', 'success');
+  };
+
+  const handleLogout = () => {
+    setContentKey(null);
+    clearAuthMeta();
+    setAuthToken(null);
+    setAuthForm({ email: '', phone: '', password: '', passwordConfirm: '' });
+    setAuthState({ unlocked: false, mode: 'login', stage: 'form', working: false, error: '' });
+    showNotificationMessage('Logged out', 'success');
   };
 
   // Format file size
@@ -674,6 +785,12 @@ const App = () => {
   const enableEmergency = () => { setEmergencyConfig(c=> ({ ...c, enabled:true })); showNotificationMessage('Emergency access enabled'); };
 
   const changeMasterPassword = async () => {
+    // TODO: Implement server-side password change via /api/change-password
+    setPwdForm(f=>({...f, error:'Password change not implemented in unified auth mode'}));
+    return;
+    
+    // Legacy implementation disabled for unified auth
+    /*
     if (!contentKey) { setPwdForm(f=>({...f, error:'Unlock first'})); return; }
   if (import.meta.env.VITE_LOCK_MASTER_PASSWORD === 'true') { setPwdForm(f=>({...f, error:'Password change locked'})); return; }
     if (!pwdForm.current || !pwdForm.next) { setPwdForm(f=>({...f, error:'Fill all fields'})); return; }
@@ -704,6 +821,7 @@ const App = () => {
     } catch (e) {
       setPwdForm(f=>({...f, working:false, error:e.message || 'Failed'}));
     }
+    */
   };
 
   // Inject auth gate overlay at top-level return
@@ -714,27 +832,116 @@ const App = () => {
           <div className="w-full max-w-md bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 p-6">
             <div className="flex items-center mb-4">
               <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center text-white mr-3"><i className="fas fa-shield-alt"></i></div>
-              <h2 className="text-xl font-semibold">{authState.step === 'create' ? 'Create Master Password' : 'Unlock Vault'}</h2>
+              <h2 className="text-xl font-semibold">
+                {authState.stage === 'showRecovery' ? 'Recovery Key' : 
+                 authState.mode === 'register' ? 'Create Account' : 'Sign In'}
+              </h2>
             </div>
+            
             {authState.error && <div className="mb-4 text-sm text-red-600 bg-red-50 dark:bg-red-900/30 p-2 rounded">{authState.error}</div>}
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-1">Master Password</label>
-                <input type="password" value={passwordInput} onChange={e=>setPasswordInput(e.target.value)} className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700" autoFocus/>
-              </div>
-              {authState.step === 'create' && (
-                <div>
-                  <label className="block text-sm font-medium mb-1">Confirm Password</label>
-                  <input type="password" value={passwordConfirm} onChange={e=>setPasswordConfirm(e.target.value)} className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"/>
+            
+            {authState.stage === 'showRecovery' ? (
+              // Recovery key display
+              <div className="space-y-4">
+                <div className="bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-700 rounded-lg p-4">
+                  <div className="flex items-center mb-2">
+                    <i className="fas fa-exclamation-triangle text-yellow-600 mr-2"></i>
+                    <span className="font-medium text-yellow-800 dark:text-yellow-200">Important: Save Your Recovery Key</span>
+                  </div>
+                  <p className="text-sm text-yellow-700 dark:text-yellow-300 mb-3">
+                    This key can restore access to your vault if you forget your password. Store it securely and never share it.
+                  </p>
+                  <div className="bg-white dark:bg-gray-800 border rounded p-3 font-mono text-sm break-all">
+                    {recoveryKey}
+                  </div>
                 </div>
-              )}
-              <button disabled={authState.loading} onClick={authState.step==='create'?handleCreatePassword:handleUnlock} className="w-full inline-flex justify-center items-center px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-60">
-                {authState.loading && <i className="fas fa-circle-notch fa-spin mr-2"/>}
-                {authState.step==='create' ? 'Set Password & Unlock' : 'Unlock'}
-              </button>
-            </div>
-            {authState.step==='unlock' && <p className="mt-4 text-xs text-gray-500">Your password never leaves this device. Key is derived locally (PBKDF2).</p>}
-            {authState.step==='create' && <p className="mt-4 text-xs text-gray-500">Store this password safely. It cannot be recovered if lost.</p>}
+                <button 
+                  onClick={handleRecoveryConfirm}
+                  className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-medium"
+                >
+                  I've Saved My Recovery Key - Continue
+                </button>
+              </div>
+            ) : (
+              // Login/Register form
+              <div className="space-y-4">
+                {authState.mode === 'register' && (
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Phone Number</label>
+                    <input 
+                      type="tel" 
+                      value={authForm.phone} 
+                      onChange={e=>setAuthForm(f=>({...f, phone:e.target.value}))} 
+                      className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"
+                      placeholder="For account recovery"
+                    />
+                  </div>
+                )}
+                
+                <div>
+                  <label className="block text-sm font-medium mb-1">Email</label>
+                  <input 
+                    type="email" 
+                    value={authForm.email} 
+                    onChange={e=>setAuthForm(f=>({...f, email:e.target.value}))} 
+                    className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"
+                    autoFocus={!authForm.email}
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium mb-1">Password</label>
+                  <input 
+                    type="password" 
+                    value={authForm.password} 
+                    onChange={e=>setAuthForm(f=>({...f, password:e.target.value}))} 
+                    className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"
+                    autoFocus={!!authForm.email}
+                  />
+                </div>
+                
+                {authState.mode === 'register' && (
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Confirm Password</label>
+                    <input 
+                      type="password" 
+                      value={authForm.passwordConfirm} 
+                      onChange={e=>setAuthForm(f=>({...f, passwordConfirm:e.target.value}))} 
+                      className="w-full rounded-md border border-gray-300 dark:border-gray-600 px-3 py-2 bg-white dark:bg-gray-700"
+                    />
+                  </div>
+                )}
+                
+                <button 
+                  disabled={authState.working} 
+                  onClick={authState.mode === 'register' ? handleRegister : handleLogin}
+                  className="w-full inline-flex justify-center items-center px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-60"
+                >
+                  {authState.working && <i className="fas fa-circle-notch fa-spin mr-2"/>}
+                  {authState.mode === 'register' ? 'Create Account' : 'Sign In'}
+                </button>
+                
+                <div className="text-center">
+                  <button 
+                    onClick={() => {
+                      setAuthState(a => ({ ...a, mode: a.mode === 'login' ? 'register' : 'login', error: '' }));
+                      setAuthForm(f => ({ ...f, phone: '', password: '', passwordConfirm: '' }));
+                    }}
+                    className="text-sm text-blue-600 hover:text-blue-700"
+                  >
+                    {authState.mode === 'register' ? 'Already have an account? Sign In' : 'Need an account? Sign Up'}
+                  </button>
+                </div>
+              </div>
+            )}
+            
+            {authState.stage === 'form' && (
+              <p className="mt-4 text-xs text-gray-500">
+                {authState.mode === 'register' 
+                  ? 'Your data is encrypted client-side. We cannot recover lost passwords.' 
+                  : 'Your password never leaves this device. Keys are derived locally.'}
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -868,11 +1075,49 @@ const App = () => {
                     >Reload Remote</button>
                   </div>
                 )}
-                  <button className="flex items-center text-sm rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500" id="user-menu-button">
-                    <div className="h-8 w-8 rounded-full bg-blue-500 flex items-center justify-center text-white font-medium">
-                      {user.name.split(' ').map(n => n[0]).join('')}
-                    </div>
-                  </button>
+                  <div className="relative">
+                    <button 
+                      onClick={() => setShowUserMenu(!showUserMenu)}
+                      className="flex items-center text-sm rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500" 
+                      id="user-menu-button"
+                    >
+                      <div className="h-8 w-8 rounded-full bg-blue-500 flex items-center justify-center text-white font-medium">
+                        {user.name.split(' ').map(n => n[0]).join('')}
+                      </div>
+                    </button>
+                    
+                    {showUserMenu && (
+                      <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 rounded-md shadow-lg py-1 border border-gray-200 dark:border-gray-700 z-50">
+                        <button
+                          onClick={() => {
+                            setCurrentView('settings');
+                            setShowUserMenu(false);
+                          }}
+                          className="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                        >
+                          <i className="fas fa-user mr-2"></i>
+                          Profile & Settings
+                        </button>
+                        <button
+                          onClick={handleLock}
+                          className="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                        >
+                          <i className="fas fa-lock mr-2"></i>
+                          Lock Vault
+                        </button>
+                        <button
+                          onClick={() => {
+                            handleLogout();
+                            setShowUserMenu(false);
+                          }}
+                          className="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+                        >
+                          <i className="fas fa-sign-out-alt mr-2"></i>
+                          Logout
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

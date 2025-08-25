@@ -66,7 +66,8 @@ serverApp.post('/api/register', async (req,res)=>{
   try {
     const { email, phone, password } = req.body || {};
     if(!email || !phone || !password) return res.status(400).json({ error:'Missing fields' });
-    if(findUser(email)) return res.status(409).json({ error:'Email exists' });
+    const emailLower = email.toLowerCase(); // Store email in lowercase
+    if(findUser(emailLower)) return res.status(409).json({ error:'Email exists' });
     const users = loadUsers();
     const pwHash = await bcrypt.hash(password, 12);
     const phoneHash = await bcrypt.hash(phone, 10);
@@ -78,9 +79,10 @@ serverApp.post('/api/register', async (req,res)=>{
     const wrapKeyRk = crypto.createHash('sha256').update(recoveryKey).digest(); // simple KDF for recovery key
     const wrappedDEK_pw = wrapDEK(dek, wrapKeyPw);
     const wrappedDEK_rk = wrapDEK(dek, wrapKeyRk);
-    const user = { email, phoneHash, pwHash, kdfSalt: kdfSaltB64, kdfIterations, wrappedDEK_pw, wrappedDEK_rk, createdAt: Date.now() };
+    const user = { email: emailLower, phoneHash, pwHash, kdfSalt: kdfSaltB64, kdfIterations, wrappedDEK_pw, wrappedDEK_rk, createdAt: Date.now() };
     users.push(user); saveUsers(users);
-    res.json({ ok:true, recoveryKey: b64(recoveryKey), kdfSalt: kdfSaltB64, kdfIterations, wrappedDEK_pw });
+    const token = jwt.sign({ sub: emailLower }, JWT_SECRET, { expiresIn:'12h' });
+    res.json({ ok:true, token, recoveryKey: b64(recoveryKey), kdfSalt: kdfSaltB64, kdfIterations, wrappedDEK_pw });
   } catch(e){ console.error(e); res.status(500).json({ error:'Register failed' }); }
 });
 
