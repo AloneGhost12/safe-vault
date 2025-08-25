@@ -1053,36 +1053,7 @@ const App = () => {
               {/* Storage Usage (dynamic) */}
               {/* Cloudinary Status */}
               <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6 mb-8">
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <h3 className="text-lg font-medium text-gray-900 dark:text-white flex items-center gap-2">
-                      <i className="fas fa-cloud-upload-alt text-blue-600 dark:text-blue-400"></i>
-                      Cloudinary Status
-                    </h3>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">Encrypted blobs stored via Cloudinary raw uploads</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {import.meta.env.VITE_CLOUDINARY_CLOUD_NAME ? (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"><i className="fas fa-check mr-1"/>Configured</span>
-                    ) : (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"><i className="fas fa-times mr-1"/>Missing Env</span>
-                    )}
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                  <div className="space-y-1">
-                    <p className="text-gray-500 dark:text-gray-400">Cloud Name</p>
-                    <p className="font-mono text-xs break-all text-gray-800 dark:text-gray-200">{import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'ΓÇö'}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-gray-500 dark:text-gray-400">Unsigned Preset</p>
-                    <p className="font-mono text-xs break-all text-gray-800 dark:text-gray-200">{import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'ΓÇö'}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-gray-500 dark:text-gray-400">Files w/ Cloudinary ID</p>
-                    <p className="font-semibold">{uploadedFiles.filter(f=>f.cloudinaryId).length} / {uploadedFiles.length}</p>
-                  </div>
-                </div>
+                <CloudinaryStatus uploadedFiles={uploadedFiles} lastCloudinaryError={lastCloudinaryError} setLastCloudinaryError={setLastCloudinaryError} />
                 {lastCloudinaryError && (
                   <div className="mt-3 text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 p-2 rounded flex items-start gap-2">
                     <i className="fas fa-exclamation-triangle mt-0.5"/>
@@ -1100,11 +1071,7 @@ const App = () => {
                     )}
                   </div>
                 </div>
-                {!import.meta.env.VITE_CLOUDINARY_CLOUD_NAME && (
-                  <div className="mt-4 text-xs text-yellow-700 dark:text-yellow-300 bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800 p-3 rounded">
-                    Add VITE_CLOUDINARY_CLOUD_NAME and VITE_CLOUDINARY_UPLOAD_PRESET to .env.local then restart dev server.
-                  </div>
-                )}
+                {/* guidance moved into component */}
               </div>
               <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6 mb-8">
                 <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Storage Usage</h3>
@@ -1717,3 +1684,51 @@ const App = () => {
 };
 
 export default App;
+
+// Dynamic Cloudinary status component (after export to avoid re-render clutter)
+function CloudinaryStatus({ uploadedFiles, lastCloudinaryError, setLastCloudinaryError }) {
+  const [cfg, setCfg] = useState({ cloudName:null, uploadPreset:null, loading:true, fetched:false });
+  useEffect(()=>{ (async()=>{ try { const { getClientConfig } = await import('./services/clientConfig.js'); const c = await getClientConfig(); setCfg({ ...c, loading:false, fetched:true }); } catch { setCfg(c=>({...c, loading:false })); } })(); }, []);
+  const configured = !!cfg.cloudName && !!cfg.uploadPreset;
+  return (
+    <div>
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <h3 className="text-lg font-medium text-gray-900 dark:text-white flex items-center gap-2">
+            <i className="fas fa-cloud-upload-alt text-blue-600 dark:text-blue-400"></i>
+            Cloudinary Status
+          </h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400">Encrypted blobs stored via Cloudinary raw uploads</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {configured ? (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"><i className="fas fa-check mr-1"/>Configured</span>
+          ) : cfg.loading ? (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300"><i className="fas fa-circle-notch fa-spin mr-1"/>Checking</span>
+          ) : (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"><i className="fas fa-times mr-1"/>Not Configured</span>
+          )}
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+        <div className="space-y-1">
+          <p className="text-gray-500 dark:text-gray-400">Cloud Name</p>
+          <p className="font-mono text-xs break-all text-gray-800 dark:text-gray-200">{cfg.cloudName || '—'}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-gray-500 dark:text-gray-400">Unsigned Preset</p>
+          <p className="font-mono text-xs break-all text-gray-800 dark:text-gray-200">{cfg.uploadPreset || '—'}</p>
+        </div>
+        <div className="space-y-1">
+          <p className="text-gray-500 dark:text-gray-400">Files w/ Cloudinary ID</p>
+          <p className="font-semibold">{uploadedFiles.filter(f=>f.cloudinaryId).length} / {uploadedFiles.length}</p>
+        </div>
+      </div>
+      {!configured && !cfg.loading && (
+        <div className="mt-4 text-xs text-yellow-700 dark:text-yellow-300 bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800 p-3 rounded">
+          Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_UPLOAD_PRESET (server env) or VITE_CLOUDINARY_CLOUD_NAME / VITE_CLOUDINARY_UPLOAD_PRESET (build) and reload.
+        </div>
+      )}
+    </div>
+  );
+}
