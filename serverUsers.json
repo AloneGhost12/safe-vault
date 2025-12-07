@@ -16,5 +16,23 @@
       "tag": "cAMpl1WU3DPLMrYrVhVd3w=="
     },
     "createdAt": 1756091966830
+  },
+  {
+    "email": "alone@gmail.com",
+    "phoneHash": "$2a$10$K.p4YE49DBLzkeqNCe276uzkVdiQEMjAde7JOZe8.esFdSpROuyQ6",
+    "pwHash": "$2a$12$XsJwQGwcOlJlOM5TL8Y3dO727V65v26hw7BHZ3PZjuxulDWfxpF.2",
+    "kdfSalt": "Gy4xMPOwz+aAXtiZn73slg==",
+    "kdfIterations": 310000,
+    "wrappedDEK_pw": {
+      "iv": "XG0DBdMmZvo3QvuZ",
+      "ct": "R1OcM/5E4SBH/nBF0iF/4jDplEbjMUvUCTUHINaaD8k=",
+      "tag": "46qpQcVeKIbm3jroFVvkTw=="
+    },
+    "wrappedDEK_rk": {
+      "iv": "+X5OldgtR7sQ2Btb",
+      "ct": "Im/dPqo6y785wz4bhq2Yq0MwwK0F6ivcD9ZuxQUbnHM=",
+      "tag": "MJiPHEZ4dW/+dWUvkKAEBQ=="
+    },
+    "createdAt": 1764519821069
   }
 ]

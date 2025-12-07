@@ -10,8 +10,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-  "server": "node server.js",
-  "start": "node scripts/ensure-mongodb.js && node scripts/preflight.js && node server.js",
+    "server": "node server.js",
+    "start": "node scripts/ensure-mongodb.js && node scripts/preflight.js && node server.js",
     "render-build": "vite build",
     "postinstall": "node -e \"console.log('postinstall complete')\""
   },
