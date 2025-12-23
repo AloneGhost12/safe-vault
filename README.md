@@ -50,3 +50,31 @@ Server only:
 - JWT_SECRET (for auth endpoints if extended)
 
 Remove any legacy Firebase vars; they are no longer used.
+
+## Deployment
+
+This application consists of two parts:
+
+### Backend (Express + MongoDB)
+Deploy the backend to Render or similar platform:
+1. The `render.yaml` file is pre-configured for Render deployment
+2. Set the environment variables in your hosting platform dashboard
+3. The backend will be available at a URL like `https://your-app-name.onrender.com`
+
+### Frontend (React SPA) 
+Deploy the frontend to GitHub Pages:
+1. The repository includes a GitHub Actions workflow that automatically builds and deploys to GitHub Pages
+2. Create a `.env.local` file with: `VITE_API_BASE_URL=https://your-backend-url.onrender.com`
+3. Push to the main branch to trigger automatic deployment
+4. The frontend will be available at `https://your-username.github.io/safe-vault/`
+
+### Development
+For local development, run both parts:
+```bash
+# Terminal 1: Start backend server
+npm run server
+
+# Terminal 2: Start frontend dev server  
+npm run dev
+```
+The Vite dev server proxies `/api/*` requests to the backend automatically.
